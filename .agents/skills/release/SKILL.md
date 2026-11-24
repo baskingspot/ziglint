@@ -5,60 +5,16 @@ description: Publishes ziglint releases. Use when releasing, versioning, tagging
 
 # Releasing ziglint
 
-## Quick Release Checklist
+The org's release workflow does the work; this repo supplies three things and a tag.
 
-1. Update version in `build.zig.zon`
-2. Write release notes in `docs/releases/vX.Y.Z.md`
-3. Commit changes
-4. Tag and push: `git tag vX.Y.Z && git push && git push --tags`
+1. Write `docs/releases/vX.Y.Z.md`. It is the GitHub release body and the site's changelog entry, so the file is written once. The examples are `tests`; the install sections are not; do not add one, the workflow appends it.
+2. Set `.version` in `build.zig.zon` and update `.github/release.yaml` only if the platforms change.
+3. Commit, push, then `just release X.Y.Z`. It checks a clean tree on `main` level with `origin`, makes a signed tag, and pushes it.
 
-## Release Notes
+A `v*` tag runs the shared workflow in `baskingspot/gh-actions`: the repo's CI, the builds for the platforms in `.github/release.yaml`, `SHA256SUMS`, an attestation, the GitHub release, and a Homebrew cask installed on macOS and Linux before it is committed to `baskingspot/homebrew-tap`.
 
-Create a markdown file at `docs/releases/vX.Y.Z.md` (must match the tag name exactly).
+Nothing is uploaded by hand. A release that fails leaves the tag; fix forward with the next version, or delete the release and re-run the whole workflow when the failure is the workflow's own.
 
-Example for `docs/releases/v0.1.0.md`:
+## The notes file
 
-```markdown
-## What's New
-
-- Initial release of ziglint
-- Zig linting and style checks
-
-## Breaking Changes
-
-None (initial release)
-
-## Installation
-
-```bash
-mise use github:rockorager/ziglint
-```
-```
-
-If no release notes file exists, the release will use "Release vX.Y.Z" as the body.
-
-## What Happens on Release
-
-When you push a tag matching `v*`:
-
-1. **Build job** - Cross-compiles on ubuntu-latest for:
-   - `aarch64-macos`
-   - `x86_64-linux`
-   - `x86_64-windows`
-2. **Release job** - Creates GitHub release with:
-   - Tarballs (`.tar.gz`) for Unix platforms
-   - Zip (`.zip`) for Windows
-   - `checksums.txt` with SHA256 hashes
-   - Release notes from `docs/releases/vX.Y.Z.md`
-
-## Prerelease Tags
-
-Tags containing `-` (e.g., `v0.1.0-beta`, `v0.2.0-rc1`) are automatically marked as prereleases on GitHub.
-
-## Installing via mise
-
-Users can install ziglint directly from GitHub releases:
-
-```bash
-mise use github:rockorager/ziglint
-```
+A note opens with one `## ` heading that says what the release does, then a paragraph for someone deciding whether to upgrade, then `## Changes` or `## Fixes`. A user-visible behavior only: a rule that changed, a flag, an output format. Not a refactor, not a lint fix, not a dependency bump.
