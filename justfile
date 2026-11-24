@@ -1,4 +1,4 @@
-# ziglint: opinionated linting, in 34 rules. `just --list` shows the recipes.
+# ziglint: opinionated linting, in 35 rules. `just --list` shows the recipes.
 # AGENTS.md holds the working conventions.
 
 [private]

@@ -7,10 +7,10 @@ Opinionated linting to keep your agent in check.
 A compiler does not care that a function is named `MyBadName`, that an import
 is unused, or that a materialized type hides a private one. An agent learns
 the same way, from the error it gets, and it cannot get one that does not
-exist. ziglint is the second reader: 34 rules over the AST, each with a test,
+exist. ziglint is the second reader: 35 rules over the AST, each with a test,
 and each with a note that says why the rule exists.
 
-- [Rules](#rules): what the 34 checks cover, and how to turn one off. The [rule reference](rules/) has the note for each.
+- [Rules](#rules): what the 35 checks cover, and how to turn one off. The [rule reference](rules/) has the note for each.
 - [Inline ignores](#inline-ignores): one comment silences one rule on one line, so a deliberate exception costs one line of prose.
 - [Reading a rule](#reading-a-rule): `ziglint --explain Z024` prints the note in the terminal, and `--list-rules` prints every code and title.
 - [Limits](#limits): no autofix, no formatting, and nothing a parse cannot see.

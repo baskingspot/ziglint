@@ -38,6 +38,7 @@ pub const Rule = enum(u16) {
     Z033 = 33,
     Z034 = 34,
     Z035 = 35,
+    Z036 = 36,
 
     /// Returns the config struct type for this rule.
     /// All config types have `enabled: bool` (default varies per rule).
@@ -279,9 +280,135 @@ pub const Rule = enum(u16) {
                 const path = if (sep < context.len) context[sep + 1 ..] else "";
                 try writer.print("use alias {s}'{s}'{s} instead of {s}'{s}'{s}", .{ y, alias, r, y, path, r });
             },
+            .Z036 => try writeTestingExpectMessage(writer, context, b, y, m, d, r),
         }
     }
 };
+
+pub const TestingExpectPattern = struct {
+    id: []const u8,
+    module: []const u8,
+    func: []const u8,
+    arity: usize,
+    type_arg: TypeArg = .none,
+    replacement: []const u8,
+    params: []const []const u8,
+    replacement_type_param: bool = false,
+
+    pub const TypeArg = enum {
+        none,
+        u8_only,
+        non_u8_runtime,
+        non_comptime_float,
+    };
+
+    pub fn origTypeLabel(self: TestingExpectPattern) ?[]const u8 {
+        return switch (self.type_arg) {
+            .u8_only => "u8",
+            .non_u8_runtime => "T",
+            .none, .non_comptime_float => null,
+        };
+    }
+};
+
+pub const testing_expect_patterns = [_]TestingExpectPattern{
+    .{
+        .id = "startsWith",
+        .module = "mem",
+        .func = "startsWith",
+        .arity = 3,
+        .type_arg = .u8_only,
+        .replacement = "expectStringStartsWith",
+        .params = &.{ "actual", "expected" },
+    },
+    .{
+        .id = "endsWith",
+        .module = "mem",
+        .func = "endsWith",
+        .arity = 3,
+        .type_arg = .u8_only,
+        .replacement = "expectStringEndsWith",
+        .params = &.{ "actual", "expected" },
+    },
+    .{
+        .id = "eql_u8",
+        .module = "mem",
+        .func = "eql",
+        .arity = 3,
+        .type_arg = .u8_only,
+        .replacement = "expectEqualStrings",
+        .params = &.{ "expected", "actual" },
+    },
+    .{
+        .id = "eql_slice",
+        .module = "mem",
+        .func = "eql",
+        .arity = 3,
+        .type_arg = .non_u8_runtime,
+        .replacement = "expectEqualSlices",
+        .params = &.{ "T", "expected", "actual" },
+        .replacement_type_param = true,
+    },
+    .{
+        .id = "meta_eql",
+        .module = "meta",
+        .func = "eql",
+        .arity = 2,
+        .replacement = "expectEqual",
+        .params = &.{ "expected", "actual" },
+    },
+    .{
+        .id = "approxEqAbs",
+        .module = "math",
+        .func = "approxEqAbs",
+        .arity = 4,
+        .type_arg = .non_comptime_float,
+        .replacement = "expectApproxEqAbs",
+        .params = &.{ "expected", "actual", "tolerance" },
+    },
+    .{
+        .id = "approxEqRel",
+        .module = "math",
+        .func = "approxEqRel",
+        .arity = 4,
+        .type_arg = .non_comptime_float,
+        .replacement = "expectApproxEqRel",
+        .params = &.{ "expected", "actual", "tolerance" },
+    },
+};
+
+fn findTestingExpectPattern(id: []const u8) TestingExpectPattern {
+    for (testing_expect_patterns) |pattern| {
+        if (std.mem.eql(u8, pattern.id, id)) return pattern;
+    }
+    unreachable;
+}
+
+fn writeTestingExpectMessage(
+    writer: *std.Io.Writer,
+    context: []const u8,
+    b: []const u8,
+    y: []const u8,
+    m: []const u8,
+    d: []const u8,
+    r: []const u8,
+) !void {
+    const pattern = findTestingExpectPattern(context);
+
+    try writer.print("use {s}{s}{s}{s}({s}", .{ b, pattern.replacement, r, d, r });
+    for (pattern.params, 0..) |param, idx| {
+        if (idx > 0) try writer.print("{s}, {s}", .{ d, r });
+        const color = if (idx == 0 and pattern.replacement_type_param) m else y;
+        try writer.print("{s}{s}{s}", .{ color, param, r });
+    }
+    try writer.print("{s}){s} instead of {s}expect{s}{s}({s}{s}std{s}{s}.{s}{s}{s}{s}{s}.{s}{s}{s}{s}{s}({s}", .{
+        d, r, b, r, d, r, y, r, d, r, y, pattern.module, r, d, r, b, pattern.func, r, d, r,
+    });
+    if (pattern.origTypeLabel()) |orig_type| {
+        try writer.print("{s}{s}{s}{s}, {s}", .{ m, orig_type, r, d, r });
+    }
+    try writer.print("{s}...)){s}", .{ d, r });
+}
 
 fn writeHighlightedStructInit(writer: *std.Io.Writer, code: []const u8, type_color: []const u8, dim: []const u8, reset: []const u8) !void {
     const yellow = "\x1b[33m";
@@ -495,4 +622,44 @@ test "Z034 recommends writeAll for literal prints" {
         "print() has no format placeholders and empty args; use writeAll() instead",
         output.written(),
     );
+}
+
+test "Z036 formats each specific testing assertion" {
+    const cases = [_]struct { context: []const u8, expected: []const u8 }{
+        .{
+            .context = "startsWith",
+            .expected = "use expectStringStartsWith(actual, expected) instead of expect(std.mem.startsWith(u8, ...))",
+        },
+        .{
+            .context = "endsWith",
+            .expected = "use expectStringEndsWith(actual, expected) instead of expect(std.mem.endsWith(u8, ...))",
+        },
+        .{
+            .context = "eql_u8",
+            .expected = "use expectEqualStrings(expected, actual) instead of expect(std.mem.eql(u8, ...))",
+        },
+        .{
+            .context = "eql_slice",
+            .expected = "use expectEqualSlices(T, expected, actual) instead of expect(std.mem.eql(T, ...))",
+        },
+        .{
+            .context = "meta_eql",
+            .expected = "use expectEqual(expected, actual) instead of expect(std.meta.eql(...))",
+        },
+        .{
+            .context = "approxEqAbs",
+            .expected = "use expectApproxEqAbs(expected, actual, tolerance) instead of expect(std.math.approxEqAbs(...))",
+        },
+        .{
+            .context = "approxEqRel",
+            .expected = "use expectApproxEqRel(expected, actual, tolerance) instead of expect(std.math.approxEqRel(...))",
+        },
+    };
+
+    for (cases) |tc| {
+        var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+        defer output.deinit();
+        try Rule.Z036.writeMessage(&output.writer, tc.context, false);
+        try std.testing.expectEqualStrings(tc.expected, output.written());
+    }
 }
