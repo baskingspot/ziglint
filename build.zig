@@ -44,11 +44,30 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(exe_tests).step);
 
-    const fmt_check = b.addFmt(.{ .paths = &.{ "src", "build.zig", "build.zig.zon" } });
+    const fmt_check = b.addFmt(.{ .paths = &.{ "src", "build.zig", "build.zig.zon", "site.zig" } });
     test_step.dependOn(&fmt_check.step);
 
-    const lint_step = addLint(b, exe, &.{ b.path("src"), b.path("build.zig") });
+    const lint_step = addLint(b, exe, &.{ b.path("src"), b.path("build.zig"), b.path("site.zig") });
     test_step.dependOn(lint_step);
+
+    // The site's rule and changelog pages, from the files the tool and the
+    // release workflow already read. `just doc` runs this first.
+    const gen_site = b.addExecutable(.{
+        .name = "gen_site",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("site.zig"),
+            .target = target,
+            .optimize = .ReleaseFast,
+        }),
+    });
+    const run_gen_site = b.addRunArtifact(gen_site);
+    run_gen_site.addArgs(&.{
+        b.pathFromRoot("src/docs/rules"),
+        b.pathFromRoot("docs/releases"),
+        b.pathFromRoot("docs/content"),
+    });
+    const site_step = b.step("site", "Regenerate the site's rule and changelog pages under docs/content");
+    site_step.dependOn(&run_gen_site.step);
 }
 
 /// Add a ziglint step to your build. Use as a dependency to run linting.
@@ -105,6 +124,12 @@ fn addPathInputs(b: *std.Build, run: *std.Build.Step.Run, lazy_path: std.Build.L
 }
 
 fn getVersion(b: *std.Build) []const u8 {
+    // A Nix build has no `.git`, so the package passes the version it read
+    // from build.zig.zon. Everything else asks git for the described tag.
+    if (b.option([]const u8, "version", "The version to report; defaults to `git describe`")) |version| {
+        return version;
+    }
+
     var code: u8 = undefined;
     const git_describe = b.runAllowFail(&.{ "git", "describe", "--match", "v*.*.*", "--tags" }, &code, .ignore) catch {
         return "unknown";

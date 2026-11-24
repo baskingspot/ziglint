@@ -1,47 +1,37 @@
 {
-  description = "ziglint dev environment";
-
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    flake-parts.url = "github:hercules-ci/flake-parts";
-    mattware = {
-      url = "github:mattrobenolt/nixpkgs";
+    flake-parts.follows = "baskingspot/flake-parts";
+    baskingspot = {
+      url = "github:baskingspot/nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
   outputs =
-    inputs@{
-      self,
-      flake-parts,
-      nixpkgs,
-      mattware,
-      ...
-    }:
+    inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [
-        "x86_64-linux"
-        "x64_64-darwin"
-        "aarch64-linux"
-        "aarch64-darwin"
+      # imports and inputsFrom below mirror each other, including the
+      # toolchain version: pick that once, in the import.
+      imports = with inputs.baskingspot.flakeModules; [
+        base
+        docs
+        zig."0.16"
       ];
 
       perSystem =
-        { system, ... }:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ mattware.overlays.default ];
-          };
-        in
+        { pkgs, config, ... }:
         {
-          formatter = pkgs.nixfmt-tree;
+          packages = rec {
+            ziglint = pkgs.callPackage ./nix/package.nix { };
+            default = ziglint;
+          };
 
           devShells.default = pkgs.mkShell {
-            packages = with pkgs; [
-              zig_0_16
-              zls_0_16
-              zigdoc
+            inputsFrom = [
+              config.devShells.base
+              config.devShells.docs
+              config.devShells."zig-0-16"
             ];
           };
         };

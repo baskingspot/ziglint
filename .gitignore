@@ -1,3 +1,17 @@
 .zig-cache/
 zig-out/
 *.o
+.direnv/
+.envrc.local
+
+# Local wrangler state.
+.wrangler/
+
+# The link baskingspot-docs makes to the theme.
+docs/themes/
+
+# Built by `just doc`.
+docs/content/rules/
+docs/content/changelog/
+result
+dist/
