@@ -1,0 +1,6 @@
+# What a release ships. The names and the archive layout are the org's, set by
+# the shared release workflow. A program names its binary, and its platforms if
+# it ships fewer than the default three: linux-x64, linux-arm64, macos-arm64.
+# windows-x64 is a zip, and nothing else: no cask, no other channel.
+binary: ziglint
+platforms: [linux-x64, linux-arm64, macos-arm64, windows-x64]

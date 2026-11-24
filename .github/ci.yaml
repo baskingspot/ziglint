@@ -1,0 +1,14 @@
+# The full gate runs on the default shell, Zig 0.16, which is the version
+# ziglint lints against. The cross-target compile is one job because the
+# targets share a cache. The macOS lane runs the same tests on a real Apple
+# Silicon Mac and does not block until it passes.
+jobs:
+  - recipe: test
+  - recipe: package
+  - recipe: build-targets
+  - recipe: lint
+  - recipe: test
+    runners: [ubuntu-26.04-arm]
+  - recipe: test
+    runners: [macos-26]
+    blocking: false

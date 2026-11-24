@@ -1,0 +1,16 @@
+name: zizmor
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+jobs:
+  zizmor:
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: baskingspot/gh-actions/.github/workflows/zizmor.yml@a8c8fd0d7e28ac1ceffd1c0eb4dc642f09756c60 # v0.13.3
