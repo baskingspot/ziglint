@@ -1,0 +1,21 @@
+{
+  // Schema lives on unpkg because this repo has no node_modules.
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "baskingspot-dev-ziglint",
+  // Set to the date of the last deploy-relevant config change.
+  "compatibility_date": "2026-11-24",
+  // Pure static site: no worker script, so no `main` and no `binding`.
+  "assets": {
+    // The guide, the rule reference, and the changelog under /ziglint/ (see justfile `doc`).
+    // The router in baskingspot/site forwards /ziglint/... without stripping
+    // the prefix, so the Worker sees the paths as built.
+    "directory": "./zig-out/site",
+    "not_found_handling": "none",
+    "html_handling": "auto-trailing-slash",
+  },
+  // Deployed by CI after the Terraform in baskingspot/site creates this Worker
+  // and attaches baskingspot.dev/ziglint/ to it. No routes here: the router
+  // owns the domain and forwards the prefix.
+  "workers_dev": false,
+  "preview_urls": false,
+}
