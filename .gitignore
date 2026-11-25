@@ -12,6 +12,6 @@ docs/themes/
 
 # Built by `just doc`.
 docs/content/rules/
-docs/content/changelog/
+docs/content/changelog.md
 result
 dist/

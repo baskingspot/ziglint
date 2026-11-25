@@ -63,10 +63,9 @@ pub fn build(b: *std.Build) void {
     const run_gen_site = b.addRunArtifact(gen_site);
     run_gen_site.addArgs(&.{
         b.pathFromRoot("src/docs/rules"),
-        b.pathFromRoot("docs/releases"),
         b.pathFromRoot("docs/content"),
     });
-    const site_step = b.step("site", "Regenerate the site's rule and changelog pages under docs/content");
+    const site_step = b.step("site", "Regenerate the site's rule pages under docs/content");
     site_step.dependOn(&run_gen_site.step);
 }
 

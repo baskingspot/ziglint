@@ -7,8 +7,8 @@ description: Publishes ziglint releases. Use when releasing, versioning, tagging
 
 The org's release workflow does the work; this repo supplies three things and a tag.
 
-1. Write `docs/releases/vX.Y.Z.md`. It is the GitHub release body and the site's changelog entry, so the file is written once. The examples are `tests`; the install sections are not; do not add one, the workflow appends it.
-2. Set `.version` in `build.zig.zon` and update `.github/release.yaml` only if the platforms change.
+1. Move the `## [Unreleased]` section of `CHANGELOG.md` into `## [X.Y.Z] - DATE` and run `just release-prep X.Y.Z` from `~/code/baskingspot/.github`. The script stamps the section, writes `docs/releases/vX.Y.Z.md` from it for the GitHub release body, and sets `.version` in `build.zig.zon`. Do not add an install section; the workflow appends one.
+2. Update `.github/release.yaml` only if the platforms change.
 3. Commit, push, then `just release X.Y.Z`. It checks a clean tree on `main` level with `origin`, makes a signed tag, and pushes it.
 
 A `v*` tag runs the shared workflow in `baskingspot/gh-actions`: the repo's CI, the builds for the platforms in `.github/release.yaml`, `SHA256SUMS`, an attestation, the GitHub release, and a Homebrew cask installed on macOS and Linux before it is committed to `baskingspot/homebrew-tap`.

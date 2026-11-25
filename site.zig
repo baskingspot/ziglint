@@ -1,18 +1,13 @@
-//! Writes the site's generated pages from what the repo already holds.
+//! Writes the site's rule reference from the notes the tool already carries.
 //!
-//! Two trees come out of here, both ignored by git and rebuilt by `just doc`:
+//! `src/docs/rules/*.md` is the same markdown `ziglint --explain` prints and
+//! the doc tests execute, so the site cannot describe a rule differently from
+//! the tool. Zola reads TOML frontmatter and the notes carry YAML, so this
+//! step exists to add it. The tree it writes, `docs/content/rules/`, is
+//! gitignored and rebuilt by `just doc`.
 //!
-//! - `docs/content/rules/`, one page per rule plus an index, from
-//!   `src/docs/rules/*.md`. That is the same markdown `ziglint --explain`
-//!   prints and the doc tests execute, so the site cannot describe a rule
-//!   differently from the tool.
-//! - `docs/content/changelog/`, one page per release plus an index, from
-//!   `docs/releases/*.md`. That is the same file the release workflow uses as
-//!   the release body.
-//!
-//! Zola reads TOML frontmatter and the rule files carry YAML, so the step
-//! exists to add it. Nothing here writes prose: every page is a rewrite of a
-//! file a person maintains.
+//! The changelog is not here: `baskingspot-docs` copies the root `CHANGELOG.md`
+//! into the site and anchors its headings, so the history is written once.
 
 const std = @import("std");
 
@@ -22,34 +17,24 @@ const Rule = struct {
     body: []const u8,
 };
 
-const Release = struct {
-    version: []const u8,
-    summary: []const u8,
-    body: []const u8,
-};
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
     const args = try init.minimal.args.toSlice(init.arena.allocator());
-    if (args.len != 4) {
-        std.debug.print("Usage: {s} <rules-dir> <releases-dir> <content-dir>\n", .{args[0]});
+    if (args.len != 3) {
+        std.debug.print("Usage: {s} <rules-dir> <content-dir>\n", .{args[0]});
         return error.InvalidArgs;
     }
     const rules_dir = args[1];
-    const releases_dir = args[2];
-    const content_dir = args[3];
+    const content_dir = args[2];
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
 
     const rules = try readRules(arena, io, rules_dir);
-    const releases = try readReleases(arena, io, releases_dir);
-
     try writeRules(arena, io, content_dir, rules);
-    try writeChangelog(arena, io, content_dir, releases);
 }
 
 fn fail(path: []const u8, err: anyerror) error{InvalidInput} {
@@ -63,8 +48,8 @@ fn readFile(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const
     };
 }
 
-/// The names of the `.md` files in `dir`, sorted. Only these two directories
-/// are ever read, so a flat listing is enough.
+/// The names of the `.md` files in `dir`, sorted. Only the rules directory is
+/// read, so a flat listing is enough.
 fn listMarkdown(allocator: std.mem.Allocator, io: std.Io, dir_path: []const u8) ![]const []const u8 {
     var dir = std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true }) catch |err| {
         return fail(dir_path, err);
@@ -91,32 +76,11 @@ fn byName(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-fn byVersionDesc(_: void, a: Release, b: Release) bool {
-    return versionOrder(a.version, b.version) == .gt;
+fn byCode(_: void, a: Rule, b: Rule) bool {
+    return std.mem.lessThan(u8, a.code, b.code);
 }
 
-fn versionOrder(a: []const u8, b: []const u8) std.math.Order {
-    const pa = parseVersion(a) orelse return .eq;
-    const pb = parseVersion(b) orelse return .eq;
-    for (pa, pb) |x, y| {
-        if (x != y) return std.math.order(x, y);
-    }
-    return .eq;
-}
-
-fn parseVersion(text: []const u8) ?[3]u64 {
-    var version: [3]u64 = .{ 0, 0, 0 };
-    var parts = std.mem.splitScalar(u8, std.mem.trimStart(u8, text, "v"), '.');
-    var index: usize = 0;
-    while (parts.next()) |part| {
-        if (index == version.len) return null;
-        version[index] = std.fmt.parseInt(u64, part, 10) catch return null;
-        index += 1;
-    }
-    return if (index == 3) version else null;
-}
-
-/// Reads the YAML frontmatter the rule files carry and returns the two fields
+/// Reads the YAML frontmatter a rule note carries and returns the two fields
 /// this uses, plus the body with the frontmatter removed.
 fn splitFrontmatter(text: []const u8) struct { rule: []const u8, title: []const u8, body: []const u8 } {
     var frontmatter: []const u8 = "";
@@ -160,38 +124,6 @@ fn readRules(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const
     }
     std.sort.block(Rule, rules.items, {}, byCode);
     return rules.toOwnedSlice(allocator);
-}
-
-fn byCode(_: void, a: Rule, b: Rule) bool {
-    return std.mem.lessThan(u8, a.code, b.code);
-}
-
-fn readReleases(allocator: std.mem.Allocator, io: std.Io, dir: []const u8) ![]const Release {
-    const names = try listMarkdown(allocator, io, dir);
-
-    var releases: std.ArrayList(Release) = .empty;
-    for (names) |name| {
-        const version = std.mem.trimEnd(u8, name, ".md");
-        if (parseVersion(version) == null) continue;
-        const path = try std.Io.Dir.path.join(allocator, &.{ dir, name });
-        const text = try readFile(allocator, io, path);
-        try releases.append(allocator, .{
-            .version = version,
-            .summary = summaryLine(text),
-            .body = std.mem.trim(u8, text, "\n"),
-        });
-    }
-    std.sort.block(Release, releases.items, {}, byVersionDesc);
-    return releases.toOwnedSlice(allocator);
-}
-
-/// The note's first `## ` heading, which is its title in one line.
-fn summaryLine(text: []const u8) []const u8 {
-    var lines = std.mem.splitScalar(u8, text, '\n');
-    while (lines.next()) |line| {
-        if (std.mem.startsWith(u8, line, "## ")) return std.mem.trim(u8, line[3..], " ");
-    }
-    return "";
 }
 
 fn writePage(allocator: std.mem.Allocator, io: std.Io, dir: []const u8, name: []const u8, title: []const u8, template: []const u8, body: []const u8) !void {
@@ -250,32 +182,6 @@ fn writeRules(allocator: std.mem.Allocator, io: std.Io, content_dir: []const u8,
         try index.appendSlice(allocator, try std.fmt.allocPrint(allocator, "- [{s}: {s}]({s}/)\n", .{ rule.code, rule.title, slug }));
     }
     try writePage(allocator, io, dir, "_index.md", "Rules", "index.html", index.items);
-}
-
-fn writeChangelog(allocator: std.mem.Allocator, io: std.Io, content_dir: []const u8, releases: []const Release) !void {
-    const dir = try std.Io.Dir.path.join(allocator, &.{ content_dir, "changelog" });
-    try replaceDir(io, dir);
-
-    var index: std.ArrayList(u8) = .empty;
-    try index.appendSlice(allocator, "# Changelog\n\n");
-    try index.appendSlice(allocator, "What changed in each release, newest first. A note is written once: the release workflow uses the same file as the GitHub release body.\n\n");
-    for (releases) |release| {
-        const summary = if (release.summary.len > 0)
-            try std.fmt.allocPrint(allocator, "{s}: {s}", .{ release.version, release.summary })
-        else
-            release.version;
-        try writePage(
-            allocator,
-            io,
-            dir,
-            try std.fmt.allocPrint(allocator, "{s}.md", .{release.version}),
-            release.version,
-            "page.html",
-            try std.fmt.allocPrint(allocator, "# {s}\n\n{s}", .{ release.version, release.body }),
-        );
-        try index.appendSlice(allocator, try std.fmt.allocPrint(allocator, "- [{s}]({s}/)\n", .{ summary, release.version }));
-    }
-    try writePage(allocator, io, dir, "_index.md", "Changelog", "index.html", index.items);
 }
 
 /// A rule that mentions another writes `[Z005](Z005.md)`, which is right for a

@@ -30,7 +30,7 @@ build-targets:
 [group("lint")]
 lint:
     nix fmt -- --ci
-    oxfmt --check README.md AGENTS.md .github
+    oxfmt --check README.md AGENTS.md CHANGELOG.md .github
     actionlint
     zizmor .
     just --fmt --check
@@ -39,10 +39,10 @@ lint:
 [group("lint")]
 fmt:
     nix fmt
-    oxfmt README.md AGENTS.md .github
+    oxfmt README.md AGENTS.md CHANGELOG.md .github
     just --fmt
 
-[doc("Regenerate docs/content/rules and docs/content/changelog from src/docs/rules and docs/releases")]
+[doc("Regenerate docs/content/rules from src/docs/rules. The changelog page is the root CHANGELOG.md, which baskingspot-docs copies in")]
 [group("docs")]
 reference:
     zig build site
