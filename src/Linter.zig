@@ -201,6 +201,7 @@ pub fn lint(self: *Linter) void {
     self.checkEmptyCatchAll();
     self.checkInstanceDeclAccess();
     self.checkPrintLiteralArgs();
+    self.checkTestingExpect();
 
     if (self.verbose and timer != null) {
         const elapsed = timerRead(self.io.?, timer.?) - checks_start;
@@ -2958,6 +2959,96 @@ fn isStdImportCall(self: *Linter, node: Ast.Node.Index) bool {
 fn findTopLevelAliasInit(self: *Linter, name: []const u8) ?Ast.Node.Index {
     const var_decl = self.findTopLevelVarDecl(name) orelse return null;
     return var_decl.ast.init_node.unwrap();
+}
+
+/// Z036: flag `std.testing.expect(...)` wrapping stdlib comparisons that have
+/// dedicated `std.testing.expect*` assertions with richer failure output.
+fn checkTestingExpect(self: *Linter) void {
+    if (!self.config.isRuleEnabled(.Z036)) return;
+
+    for (0..self.tree.nodes.len) |i| {
+        const node: Ast.Node.Index = @enumFromInt(i);
+        switch (self.tree.nodeTag(node)) {
+            .call_one, .call_one_comma, .call, .call_comma => {},
+            else => continue,
+        }
+
+        var call_buf: [1]Ast.Node.Index = undefined;
+        const call = self.tree.fullCall(&call_buf, node) orelse continue;
+        if (call.ast.params.len != 1) continue;
+        if (!self.resolvesToStdPath(call.ast.fn_expr, &.{ "testing", "expect" }, 0)) continue;
+
+        const replacement = self.matchTestingExpectArg(call.ast.params[0]) orelse continue;
+        const loc = self.tree.tokenLocation(0, self.tree.lastToken(call.ast.fn_expr));
+        self.report(loc, .Z036, replacement);
+    }
+}
+
+fn matchTestingExpectArg(self: *Linter, raw_arg: Ast.Node.Index) ?[]const u8 {
+    var arg = raw_arg;
+    while (self.tree.nodeTag(arg) == .grouped_expression) {
+        arg = self.tree.nodeData(arg).node_and_token[0];
+    }
+
+    switch (self.tree.nodeTag(arg)) {
+        .call_one, .call_one_comma, .call, .call_comma => {},
+        else => return null,
+    }
+
+    var inner_buf: [1]Ast.Node.Index = undefined;
+    const inner = self.tree.fullCall(&inner_buf, arg) orelse return null;
+
+    for (rules.testing_expect_patterns) |pattern| {
+        if (inner.ast.params.len != pattern.arity) continue;
+        if (!self.matchesTestingExpectTypeArg(pattern.type_arg, inner.ast.params[0])) continue;
+        if (!self.resolvesToStdPath(inner.ast.fn_expr, &.{ pattern.module, pattern.func }, 0)) continue;
+        return pattern.id;
+    }
+    return null;
+}
+
+fn matchesTestingExpectTypeArg(
+    self: *Linter,
+    kind: rules.TestingExpectPattern.TypeArg,
+    arg: Ast.Node.Index,
+) bool {
+    return switch (kind) {
+        .none => true,
+        .u8_only => self.isIdentifierNamed(arg, "u8"),
+        .non_u8_runtime => !self.isIdentifierNamed(arg, "u8") and !self.isComptimeOnlyTypeIdent(arg),
+        .non_comptime_float => !self.isIdentifierNamed(arg, "comptime_float"),
+    };
+}
+
+fn isIdentifierNamed(self: *Linter, node: Ast.Node.Index, name: []const u8) bool {
+    if (self.tree.nodeTag(node) != .identifier) return false;
+    return std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(node)), name);
+}
+
+fn isComptimeOnlyTypeIdent(self: *Linter, node: Ast.Node.Index) bool {
+    if (self.tree.nodeTag(node) != .identifier) return false;
+    const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
+    return std.mem.eql(u8, name, "type") or
+        std.mem.eql(u8, name, "comptime_int") or
+        std.mem.eql(u8, name, "comptime_float");
+}
+
+fn resolvesToStdPath(self: *Linter, node: Ast.Node.Index, segments: []const []const u8, depth: u8) bool {
+    if (depth > 8) return false;
+    return switch (self.tree.nodeTag(node)) {
+        .identifier => {
+            const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
+            const alias_init = self.findTopLevelAliasInit(name) orelse return false;
+            return self.resolvesToStdPath(alias_init, segments, depth + 1);
+        },
+        .field_access => {
+            if (segments.len == 0) return false;
+            const data = self.tree.nodeData(node).node_and_token;
+            if (!std.mem.eql(u8, self.tree.tokenSlice(data[1]), segments[segments.len - 1])) return false;
+            return self.resolvesToStdPath(data[0], segments[0 .. segments.len - 1], depth + 1);
+        },
+        else => segments.len == 0 and self.isStdImportCall(node),
+    };
 }
 
 fn isEmptyBlock(self: *Linter, node: Ast.Node.Index) bool {
@@ -9110,4 +9201,203 @@ test "Z034: detect annotated local writer" {
     defer linter.deinit();
     linter.lint();
     try std.testing.expectEqual(1, linter.diagnosticCount(.Z034));
+}
+
+test "Z036: detect expect(std.mem.startsWith(u8, ...))" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "startsWith" {
+        \\    const actual: []const u8 = "hello";
+        \\    try std.testing.expect(std.mem.startsWith(u8, actual, "he"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("startsWith", linter.diagnostics.items[0].context);
+}
+
+test "Z036: detect expect(std.mem.endsWith(u8, ...))" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "endsWith" {
+        \\    const actual: []const u8 = "hello";
+        \\    try std.testing.expect(std.mem.endsWith(u8, actual, "lo"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("endsWith", linter.diagnostics.items[0].context);
+}
+
+test "Z036: detect expect(std.mem.eql(u8, ...))" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "eql u8" {
+        \\    const actual: []const u8 = "hello";
+        \\    try std.testing.expect(std.mem.eql(u8, actual, "hello"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("eql_u8", linter.diagnostics.items[0].context);
+}
+
+test "Z036: detect expect(std.mem.eql(T, ...)) for non-u8 slices" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "eql slice" {
+        \\    const a = [_]u32{ 1, 2 };
+        \\    try std.testing.expect(std.mem.eql(u32, &a, &.{ 1, 2 }));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("eql_slice", linter.diagnostics.items[0].context);
+}
+
+test "Z036: detect expect(std.meta.eql(...))" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "meta eql" {
+        \\    try std.testing.expect(std.meta.eql(1, 1));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("meta_eql", linter.diagnostics.items[0].context);
+}
+
+test "Z036: detect expect(std.math.approxEqAbs/Rel(...))" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "approx" {
+        \\    const x: f64 = 1.0;
+        \\    try std.testing.expect(std.math.approxEqAbs(f64, x, 1.0, 1e-6));
+        \\    try std.testing.expect(std.math.approxEqRel(f64, x, 1.0, 1e-6));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(2, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("approxEqAbs", linter.diagnostics.items[0].context);
+    try std.testing.expectEqualStrings("approxEqRel", linter.diagnostics.items[1].context);
+}
+
+test "Z036: detect through top-level aliases" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\const testing = std.testing;
+        \\const expect = testing.expect;
+        \\const mem = std.mem;
+        \\const startsWith = mem.startsWith;
+        \\
+        \\test "aliases" {
+        \\    const actual: []const u8 = "hello";
+        \\    try testing.expect(mem.eql(u8, actual, "hello"));
+        \\    try expect(startsWith(u8, actual, "he"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(2, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: detect parenthesized argument" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "grouped" {
+        \\    const actual: []const u8 = "hello";
+        \\    try std.testing.expect((std.mem.eql(u8, actual, "hello")));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: allow negated comparisons and compound expressions" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "allowed" {
+        \\    const actual: []const u8 = "hello";
+        \\    try std.testing.expect(!std.mem.startsWith(u8, actual, "x"));
+        \\    try std.testing.expect(!std.mem.endsWith(u8, actual, "x"));
+        \\    try std.testing.expect(!std.mem.eql(u8, actual, "x"));
+        \\    try std.testing.expect(!std.meta.eql(actual.len, 0));
+        \\    try std.testing.expect(std.mem.startsWith(u8, actual, "h") or std.mem.endsWith(u8, actual, "o"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: allow non-u8 startsWith and endsWith" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "non-u8" {
+        \\    const nums = [_]u32{ 1, 2, 3 };
+        \\    try std.testing.expect(std.mem.startsWith(u32, &nums, &.{ 1, 2 }));
+        \\    try std.testing.expect(std.mem.endsWith(u32, &nums, &.{ 2, 3 }));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: allow comptime-only slice and float types" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "comptime-only" {
+        \\    comptime {
+        \\        try std.testing.expect(std.mem.eql(type, &.{u8}, &.{u8}));
+        \\        try std.testing.expect(std.mem.eql(comptime_int, &.{1}, &.{1}));
+        \\        try std.testing.expect(std.math.approxEqAbs(comptime_float, 1.0, 1.0, 0.1));
+        \\    }
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: ignore custom expect and mem" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\const custom = @import("custom.zig");
+        \\
+        \\fn check(expect: anytype, actual: []const u8) !void {
+        \\    try expect(std.mem.eql(u8, actual, "hello"));
+        \\}
+        \\
+        \\test "custom" {
+        \\    const actual: []const u8 = "hello";
+        \\    try custom.expect(std.mem.eql(u8, actual, "hello"));
+        \\    try std.testing.expect(custom.eql(u8, actual, "hello"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: allow specific std.testing assertions" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "good" {
+        \\    const actual: []const u8 = "hello";
+        \\    try std.testing.expectStringStartsWith(actual, "he");
+        \\    try std.testing.expectStringEndsWith(actual, "lo");
+        \\    try std.testing.expectEqualStrings("hello", actual);
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
 }

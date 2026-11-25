@@ -85,7 +85,7 @@ test "printRule shows the title and the project override" {
     try printRule(&writer, .Z024, &config, false);
 
     const output = writer.buffered();
-    try std.testing.expect(std.mem.startsWith(u8, output, "Z024: Line exceeds maximum length\n"));
+    try std.testing.expectStringStartsWith(output, "Z024: Line exceeds maximum length\n");
     try std.testing.expect(std.mem.find(u8, output, "max_length: 255 (default: 120)") != null);
     try std.testing.expect(std.mem.find(u8, output, "## Examples") != null);
 }

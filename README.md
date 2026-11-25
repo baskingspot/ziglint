@@ -7,13 +7,13 @@
 
 Opinionated linting to keep your agent in check.
 
-A compiler does not care that a function is named `MyBadName`, that an import is unused, or that a materialized type hides a private one. An agent learns the same way, from the error it gets, and there is no error to get. ziglint reads the AST that `std.zig.Ast` gives it and reports the 34 things the house style says are wrong, each with a note that says why.
+A compiler does not care that a function is named `MyBadName`, that an import is unused, or that a materialized type hides a private one. An agent learns the same way, from the error it gets, and there is no error to get. ziglint reads the AST that `std.zig.Ast` gives it and reports the 35 things the house style says are wrong, each with a note that says why.
 
 It has no dependencies, runs on the Zig tree you point it at, and prints one line per finding: `Z024: src/Linter.zig:31: line exceeds 120 bytes (252 bytes)`.
 
 ## What is in it
 
-- [Rules](https://baskingspot.dev/ziglint/#rules): what the 34 checks cover, and how `--only` and `--ignore` pick one. The [rule reference](https://baskingspot.dev/ziglint/rules/) has the note for each.
+- [Rules](https://baskingspot.dev/ziglint/#rules): what the 35 checks cover, and how `--only` and `--ignore` pick one. The [rule reference](https://baskingspot.dev/ziglint/rules/) has the note for each.
 - [Inline ignores](https://baskingspot.dev/ziglint/#inline-ignores): `// ziglint-ignore: Z001` silences one rule on one line, so a deliberate exception costs one line of prose.
 - [Reading a rule](https://baskingspot.dev/ziglint/#reading-a-rule): `ziglint --explain Z024` prints the note in the terminal, and `--list-rules` prints every code and title.
 
