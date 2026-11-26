@@ -330,7 +330,7 @@ const Alias = struct {
     rhs_node: Ast.Node.Index,
 };
 
-/// Reports qualified paths that have a top-level alias, such as
+/// Reports qualified paths that have an alias in scope, such as
 /// `std.testing.expect(...)` when `const testing = std.testing;` exists.
 /// The alias declaration itself is never reported; the qualified use is.
 fn checkAliasUsage(self: *Linter) void {
@@ -346,7 +346,7 @@ fn checkAliasUsage(self: *Linter) void {
         if (self.tree.nodeTag(node) != .field_access) continue;
         if (!isIdentifierPath(&self.tree, node)) continue;
 
-        const alias = findMatchingAlias(&self.tree, aliases.items, node) orelse continue;
+        const alias = self.findMatchingAlias(aliases.items, node) orelse continue;
         if (node == alias.rhs_node) continue;
 
         // Tests often compare an alias to its source, e.g.
@@ -358,7 +358,7 @@ fn checkAliasUsage(self: *Linter) void {
         // match so one expression does not produce two diagnostics.
         if (self.parent_map[@intFromEnum(node)].unwrap()) |parent| {
             if (self.tree.nodeTag(parent) == .field_access and
-                findMatchingAlias(&self.tree, aliases.items, parent) != null)
+                self.findMatchingAlias(aliases.items, parent) != null)
             {
                 continue;
             }
@@ -444,7 +444,8 @@ fn rangeMentionsAlias(self: *Linter, first: Ast.TokenIndex, last: Ast.TokenIndex
 }
 
 fn collectAliases(self: *Linter, aliases: *std.ArrayList(Alias)) void {
-    for (self.tree.rootDecls()) |node| {
+    for (0..self.tree.nodes.len) |i| {
+        const node: Ast.Node.Index = @enumFromInt(i);
         const var_decl = self.tree.fullVarDecl(node) orelse continue;
         if (!std.mem.eql(u8, self.tree.tokenSlice(var_decl.ast.mut_token), "const")) continue;
 
@@ -459,9 +460,20 @@ fn collectAliases(self: *Linter, aliases: *std.ArrayList(Alias)) void {
     }
 }
 
-fn findMatchingAlias(tree: *const Ast, aliases: []const Alias, node: Ast.Node.Index) ?Alias {
+fn findMatchingAlias(self: *Linter, aliases: []const Alias, node: Ast.Node.Index) ?Alias {
     for (aliases) |alias| {
-        if (pathsEqual(tree, node, alias.rhs_node)) return alias;
+        if (!pathsEqual(&self.tree, node, alias.rhs_node)) continue;
+
+        // The alias and its path root must both resolve to the declarations
+        // that were in scope where the alias was declared.
+        const alias_init = self.findTypeAliasInit(alias.name, node, self.findEnclosingContainer(node)) orelse continue;
+        if (alias_init != alias.rhs_node) continue;
+        const root = identifierPathRoot(&self.tree, node);
+        const root_name = self.tree.tokenSlice(self.tree.nodeMainToken(root));
+        const use_root = self.findTypeAliasInit(root_name, node, self.findEnclosingContainer(node)) orelse continue;
+        const alias_root = self.findTypeAliasInit(root_name, alias.rhs_node, self.findEnclosingContainer(alias.rhs_node)) orelse continue;
+        if (use_root != alias_root) continue;
+        return alias;
     }
     return null;
 }
@@ -1293,12 +1305,17 @@ fn isTypeExpression(self: *Linter, node: Ast.Node.Index) bool {
     };
 }
 
-fn isPrivateTypeRef(self: *Linter, name: []const u8, enclosing_container: Ast.Node.OptionalIndex) bool {
+fn isPrivateTypeRef(
+    self: *Linter,
+    name: []const u8,
+    use_site: Ast.Node.Index,
+    enclosing_container: Ast.Node.OptionalIndex,
+) bool {
     if (self.isCallerNameableType(name, enclosing_container)) return false;
     // Zig aliases are transparent, so an alias that reduces to something the
     // caller can spell without the alias exposes no private type, whatever
     // its `pub` status: `const Code = u40` gives them nothing `u40` does not.
-    return !self.aliasesCallerSpellable(name, enclosing_container, 0);
+    return !self.aliasesCallerSpellable(name, use_site, enclosing_container, 0);
 }
 
 /// True when an outside caller can name this type without the alias in the
@@ -1332,6 +1349,7 @@ fn isCallerNameableType(self: *Linter, name: []const u8, enclosing_container: As
 fn aliasesCallerSpellable(
     self: *Linter,
     name: []const u8,
+    use_site: Ast.Node.Index,
     enclosing_container: Ast.Node.OptionalIndex,
     depth: usize,
 ) bool {
@@ -1339,7 +1357,7 @@ fn aliasesCallerSpellable(
     // Alias chains are shallow; the cap stops a self-referential file from
     // spinning the linter on a cycle that the compiler would reject anyway.
     if (depth > 8) return false;
-    const init_node = self.findTypeAliasInit(name, enclosing_container) orelse return false;
+    const init_node = self.findTypeAliasInit(name, use_site, enclosing_container) orelse return false;
     return self.typeExprIsCallerSpellable(init_node, enclosing_container, depth + 1);
 }
 
@@ -1353,7 +1371,7 @@ fn typeExprIsCallerSpellable(
     switch (self.tree.nodeTag(node)) {
         .identifier => {
             const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
-            return self.aliasesCallerSpellable(name, enclosing_container, depth + 1);
+            return self.aliasesCallerSpellable(name, node, enclosing_container, depth + 1);
         },
         .optional_type => {
             const child = self.tree.nodeData(node).node;
@@ -1390,7 +1408,7 @@ fn fieldAccessIsCallerSpellable(
     const data = self.tree.nodeData(node).node_and_token;
     const base_name = self.tree.tokenSlice(self.tree.nodeMainToken(data[0]));
     const field_name = self.tree.tokenSlice(data[1]);
-    if (!self.aliasesCallerSpellable(base_name, enclosing_container, depth + 1)) return false;
+    if (!self.aliasesCallerSpellable(base_name, node, enclosing_container, depth + 1)) return false;
     return self.isPublicInContainer(field_name, container.toOptional());
 }
 
@@ -1405,7 +1423,7 @@ fn fieldAccessContainer(
     const base = self.tree.nodeData(node).node_and_token[0];
     if (self.tree.nodeTag(base) != .identifier) return null;
     const base_name = self.tree.tokenSlice(self.tree.nodeMainToken(base));
-    const init_node = self.findTypeAliasInit(base_name, enclosing_container) orelse return null;
+    const init_node = self.findTypeAliasInit(base_name, node, enclosing_container) orelse return null;
     var members_buf: [2]Ast.Node.Index = undefined;
     if (self.getContainerMembers(init_node, &members_buf) == null) return null;
     return init_node;
@@ -1418,19 +1436,44 @@ fn fieldAccessRootsAtLocalContainer(self: *Linter, init_node: Ast.Node.Index) bo
     const base = self.tree.nodeData(init_node).node_and_token[0];
     if (self.tree.nodeTag(base) != .identifier) return false;
     const base_name = self.tree.tokenSlice(self.tree.nodeMainToken(base));
-    const var_decl = self.findTopLevelVarDecl(base_name) orelse return false;
-    const root_init = var_decl.ast.init_node.unwrap() orelse return false;
+    const root_init = self.findTypeAliasInit(base_name, init_node, .none) orelse return false;
     var members_buf: [2]Ast.Node.Index = undefined;
     return self.getContainerMembers(root_init, &members_buf) != null;
 }
 
-/// Initializer of the declaration named `name`, searching enclosing containers
-/// from the innermost outward, then the file root.
+/// Initializer of the declaration named `name`, searching blocks and
+/// containers from the use site outward, then the file root. A nested function
+/// cannot capture outer locals, but it can still use its container's declarations.
 fn findTypeAliasInit(
     self: *Linter,
     name: []const u8,
+    use_site: Ast.Node.Index,
     enclosing_container: Ast.Node.OptionalIndex,
 ) ?Ast.Node.Index {
+    // Import classification runs before the parent map exists.
+    if (self.parent_map.len > 0) {
+        var current = use_site;
+        while (self.parent_map[@intFromEnum(current)].unwrap()) |parent| {
+            switch (self.tree.nodeTag(parent)) {
+                .block, .block_semicolon, .block_two, .block_two_semicolon => {
+                    const statements = self.getNodeChildren(parent);
+                    for (statements.slice()) |stmt| {
+                        const var_decl = self.tree.fullVarDecl(stmt) orelse continue;
+                        if (!std.mem.eql(u8, self.tree.tokenSlice(var_decl.ast.mut_token + 1), name)) continue;
+                        if (self.tree.nodeMainToken(stmt) > self.tree.nodeMainToken(use_site)) continue;
+                        return var_decl.ast.init_node.unwrap();
+                    }
+                },
+                .fn_decl => {
+                    if (self.findParamTypeNode(parent, name) != null) return null;
+                    break;
+                },
+                else => {},
+            }
+            current = parent;
+        }
+    }
+
     var container_opt = enclosing_container;
     while (container_opt.unwrap()) |container| {
         var members_buf: [2]Ast.Node.Index = undefined;
@@ -1872,7 +1915,7 @@ fn checkTypeNodeForPrivateImpl(
             for (generic_params) |gp| {
                 if (std.mem.eql(u8, type_name, gp)) return;
             }
-            if (self.isPrivateTypeRef(type_name, enclosing_container)) {
+            if (self.isPrivateTypeRef(type_name, type_node, enclosing_container)) {
                 self.reportPrivateType(fn_proto, type_name, is_error_position);
             }
         },
@@ -2680,7 +2723,7 @@ fn isIoWriterExpr(self: *Linter, use_site: Ast.Node.Index, expr: Ast.Node.Index)
         .identifier => {
             const name = self.tree.tokenSlice(self.tree.nodeMainToken(expr));
             const type_node = self.lookupScopedTypeNode(use_site, name) orelse return false;
-            return self.isIoWriterType(type_node);
+            return self.isIoWriterType(type_node, use_site);
         },
         .address_of => {
             const inner = self.tree.nodeData(expr).node;
@@ -2690,7 +2733,7 @@ fn isIoWriterExpr(self: *Linter, use_site: Ast.Node.Index, expr: Ast.Node.Index)
             const data = self.tree.nodeData(expr).node_and_token;
             const field_name = self.tree.tokenSlice(data[1]);
             const field_type = self.lookupReceiverFieldType(use_site, data[0], field_name) orelse return false;
-            return self.isIoWriterType(field_type);
+            return self.isIoWriterType(field_type, use_site);
         },
         else => return false,
     }
@@ -2876,7 +2919,7 @@ fn stripTypeWrappers(self: *Linter, type_node: Ast.Node.Index) Ast.Node.Index {
     }
 }
 
-fn isIoWriterType(self: *Linter, type_node: Ast.Node.Index) bool {
+fn isIoWriterType(self: *Linter, type_node: Ast.Node.Index, use_site: Ast.Node.Index) bool {
     const unwrapped = self.stripTypeWrappers(type_node);
 
     if (self.type_resolver) |resolver| {
@@ -2892,35 +2935,37 @@ fn isIoWriterType(self: *Linter, type_node: Ast.Node.Index) bool {
     }
 
     // Unit tests and files without semantic analysis use the syntactic path.
-    return self.isIoWriterTypePath(unwrapped, 0);
+    return self.isIoWriterTypePath(unwrapped, use_site, 0);
 }
 
 /// Syntactic fallback for `std.Io.Writer`, including local aliases such as
 /// `const Writer = std.Io.Writer;` and `const Io = std.Io;`.
-fn isIoWriterTypePath(self: *Linter, node: Ast.Node.Index, depth: u8) bool {
+fn isIoWriterTypePath(self: *Linter, node: Ast.Node.Index, use_site: Ast.Node.Index, depth: u8) bool {
     if (depth > 8) return false;
     switch (self.tree.nodeTag(node)) {
         .identifier => {
             const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
-            const alias_init = self.findTopLevelAliasInit(name) orelse return false;
-            return self.isIoWriterTypePath(self.stripTypeWrappers(alias_init), depth + 1);
+            const container = self.findEnclosingContainer(use_site);
+            const alias_init = self.findTypeAliasInit(name, use_site, container) orelse return false;
+            return self.isIoWriterTypePath(self.stripTypeWrappers(alias_init), alias_init, depth + 1);
         },
         .field_access => {
             const data = self.tree.nodeData(node).node_and_token;
             if (!std.mem.eql(u8, self.tree.tokenSlice(data[1]), "Writer")) return false;
-            return self.isStdIoRef(data[0], depth + 1);
+            return self.isStdIoRef(data[0], use_site, depth + 1);
         },
         else => return false,
     }
 }
 
-fn isStdIoRef(self: *Linter, node: Ast.Node.Index, depth: u8) bool {
+fn isStdIoRef(self: *Linter, node: Ast.Node.Index, use_site: Ast.Node.Index, depth: u8) bool {
     if (depth > 8) return false;
     switch (self.tree.nodeTag(node)) {
         .identifier => {
             const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
-            if (self.findTopLevelAliasInit(name)) |alias_init| {
-                return self.isStdIoRef(self.stripTypeWrappers(alias_init), depth + 1);
+            const container = self.findEnclosingContainer(use_site);
+            if (self.findTypeAliasInit(name, use_site, container)) |alias_init| {
+                return self.isStdIoRef(self.stripTypeWrappers(alias_init), alias_init, depth + 1);
             }
             // `Io.Writer` is the conventional alias for `std.Io.Writer`.
             return std.mem.eql(u8, name, "Io");
@@ -2928,19 +2973,21 @@ fn isStdIoRef(self: *Linter, node: Ast.Node.Index, depth: u8) bool {
         .field_access => {
             const data = self.tree.nodeData(node).node_and_token;
             if (!std.mem.eql(u8, self.tree.tokenSlice(data[1]), "Io")) return false;
-            return self.isStdImportRef(data[0], depth + 1);
+            return self.isStdImportRef(data[0], use_site, depth + 1);
         },
         else => return false,
     }
 }
 
-fn isStdImportRef(self: *Linter, node: Ast.Node.Index, depth: u8) bool {
+fn isStdImportRef(self: *Linter, node: Ast.Node.Index, use_site: Ast.Node.Index, depth: u8) bool {
     if (depth > 8) return false;
     if (self.tree.nodeTag(node) != .identifier) return false;
     const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
-    if (std.mem.eql(u8, name, "std")) return true;
-    const alias_init = self.findTopLevelAliasInit(name) orelse return false;
-    return self.isStdImportCall(alias_init);
+    const container = self.findEnclosingContainer(use_site);
+    if (self.findTypeAliasInit(name, use_site, container)) |alias_init| {
+        return self.isStdImportCall(alias_init);
+    }
+    return std.mem.eql(u8, name, "std");
 }
 
 fn isStdImportCall(self: *Linter, node: Ast.Node.Index) bool {
@@ -2954,11 +3001,6 @@ fn isStdImportCall(self: *Linter, node: Ast.Node.Index) bool {
     if (params.len != 1) return false;
     if (self.tree.nodeTag(params[0]) != .string_literal) return false;
     return std.mem.eql(u8, self.tree.tokenSlice(self.tree.nodeMainToken(params[0])), "\"std\"");
-}
-
-fn findTopLevelAliasInit(self: *Linter, name: []const u8) ?Ast.Node.Index {
-    const var_decl = self.findTopLevelVarDecl(name) orelse return null;
-    return var_decl.ast.init_node.unwrap();
 }
 
 /// Z036: flag `std.testing.expect(...)` wrapping stdlib comparisons that have
@@ -3038,7 +3080,7 @@ fn resolvesToStdPath(self: *Linter, node: Ast.Node.Index, segments: []const []co
     return switch (self.tree.nodeTag(node)) {
         .identifier => {
             const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
-            const alias_init = self.findTopLevelAliasInit(name) orelse return false;
+            const alias_init = self.findTypeAliasInit(name, node, self.findEnclosingContainer(node)) orelse return false;
             return self.resolvesToStdPath(alias_init, segments, depth + 1);
         },
         .field_access => {
@@ -6969,13 +7011,44 @@ test "Z035: pub alias is still usable" {
     try std.testing.expectEqual(1, linter.diagnosticCount(.Z035));
 }
 
-test "Z035: local aliases are not tracked" {
+test "Z035: local aliases are tracked" {
     var linter: Linter = .init(std.testing.allocator,
         \\const std = @import("std");
         \\
         \\test "example" {
         \\    const testing = std.testing;
         \\    try testing.expect(true);
+        \\    try std.testing.expect(true);
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z035));
+    try std.testing.expectEqualStrings("testing\x00std.testing", linter.diagnostics.items[0].context);
+}
+
+test "Z035: shadowed alias is not used" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\const testing = std.testing;
+        \\
+        \\test "example" {
+        \\    const testing = struct {};
+        \\    try std.testing.expect(true);
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z035));
+}
+
+test "Z035: shadowed path root does not match alias" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\const testing = std.testing;
+        \\
+        \\test "example" {
+        \\    const std = struct {};
         \\    try std.testing.expect(true);
         \\}
     , "test.zig", null);
@@ -9203,6 +9276,35 @@ test "Z034: detect annotated local writer" {
     try std.testing.expectEqual(1, linter.diagnosticCount(.Z034));
 }
 
+test "Z034: detect local writer alias" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\fn render() !void {
+        \\    const Writer = std.Io.Writer;
+        \\    var writer: *Writer = undefined;
+        \\    try writer.print("hello", .{});
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z034));
+}
+
+test "Z034: local binding shadows writer alias" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\const Writer = std.Io.Writer;
+        \\fn render() !void {
+        \\    const Writer = struct {};
+        \\    var writer: *Writer = undefined;
+        \\    try writer.print("hello", .{});
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z034));
+}
+
 test "Z036: detect expect(std.mem.startsWith(u8, ...))" {
     var linter: Linter = .init(std.testing.allocator,
         \\const std = @import("std");
@@ -9305,6 +9407,39 @@ test "Z036: detect through top-level aliases" {
     defer linter.deinit();
     linter.lint();
     try std.testing.expectEqual(2, linter.diagnosticCount(.Z036));
+}
+
+test "Z036: detect through local alias" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\test "local alias" {
+        \\    const mem = std.mem;
+        \\    try std.testing.expect(mem.eql(u8, "a", "a"));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z036));
+    try std.testing.expectEqualStrings("eql_u8", linter.diagnostics.items[0].context);
+}
+
+test "Z036: local binding shadows top-level alias" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\const mem = std.mem;
+        \\
+        \\test "local mem shadows the alias" {
+        \\    const mem = struct {
+        \\        fn eql(a: u8, b: u8, c: u8) bool {
+        \\            return a == b and b == c;
+        \\        }
+        \\    };
+        \\    try std.testing.expect(mem.eql(1, 1, 1));
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
 }
 
 test "Z036: detect parenthesized argument" {

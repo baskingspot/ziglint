@@ -5,6 +5,11 @@ Changes a user of ziglint notices, newest first, in the
 
 ## [Unreleased]
 
+### Fixes
+
+- Z034, Z035, and Z036 resolve aliases through enclosing blocks and containers.
+  Local aliases work, and shadowed names no longer resolve to file-scope declarations.
+
 ## [0.9.0] - 2026-11-24
 
 ### Any rule's note, in the terminal
