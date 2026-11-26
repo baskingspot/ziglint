@@ -6,10 +6,16 @@ pub fn build(b: *std.Build) void {
 
     const version = getVersion(b);
 
+    // `-Dstrip`: no debug info, as the release workflow ships it. It also makes
+    // the Mach-O build reproducible: the debug map carries each object file's
+    // mtime, and the linker writes it into the binary.
+    const strip = b.option(bool, "strip", "Omit debug info (the release build)");
+
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .strip = strip,
     });
 
     const options = b.addOptions();

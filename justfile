@@ -65,7 +65,7 @@ doc-deploy: doc
 [doc("Build one release target into the prefix DIR, so the program lands in DIR/bin. The shared release workflow bundles it: the archive name and layout are the org's, not this repo's")]
 [group("release")]
 release-build TARGET DIR:
-    zig build -Doptimize=ReleaseFast -Dtarget={{ TARGET }} --prefix {{ DIR }}
+    zig build -Doptimize=ReleaseFast -Dstrip -Dtarget={{ TARGET }} --prefix {{ DIR }}
 
 [doc("Tag a release and push the tag, which starts the release workflow. Checks first: a clean tree on main, level with origin")]
 [group("release")]
