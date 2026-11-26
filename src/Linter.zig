@@ -35,6 +35,7 @@ allocated_contexts: std.ArrayList([]const u8) = .empty,
 public_types: std.StringHashMapUnmanaged(void) = .empty,
 imported_types: std.StringHashMapUnmanaged(void) = .empty,
 import_bindings: std.StringHashMapUnmanaged(ImportInfo) = .empty,
+container_decls: std.ArrayList(ContainerDecl) = .empty,
 used_identifiers: std.StringHashMapUnmanaged(void) = .empty,
 current_fn_return_type: Ast.Node.OptionalIndex = .none,
 parent_map: []Ast.Node.OptionalIndex = &.{},
@@ -53,6 +54,12 @@ const ImportInfo = struct {
     name_token: Ast.TokenIndex,
     is_pub: bool,
     is_discard: bool,
+};
+
+const ContainerDecl = struct {
+    node: Ast.Node.Index,
+    name_token: Ast.TokenIndex,
+    is_import: bool,
 };
 
 pub const Diagnostic = struct {
@@ -142,6 +149,7 @@ pub fn deinit(self: *Linter) void {
     self.public_types.deinit(self.allocator);
     self.imported_types.deinit(self.allocator);
     self.import_bindings.deinit(self.allocator);
+    self.container_decls.deinit(self.allocator);
     self.used_identifiers.deinit(self.allocator);
     self.deprecation_cache.deinit(self.allocator);
     self.rule_timings.deinit(self.allocator);
@@ -194,6 +202,7 @@ pub fn lint(self: *Linter) void {
     const checks_start = if (timer) |t| timerRead(self.io.?, t) else 0;
     self.checkDeprecatedCalls();
     self.checkUnusedImports();
+    self.checkUnusedDecls();
     self.checkAliasUsage();
     self.checkThisBuiltin();
     self.checkInlineImports();
@@ -260,7 +269,9 @@ fn collectAllIdentifiers(self: *Linter) void {
         const node: Ast.Node.Index = @enumFromInt(i);
         const tag = self.tree.nodeTag(node);
         switch (tag) {
-            .identifier => {
+            .identifier, .enum_literal => {
+                // `.init()` can reference a container declaration when the
+                // result type is known, so its name counts just like `Type.init`.
                 const name = self.tree.tokenSlice(self.tree.nodeMainToken(node));
                 self.track(&self.used_identifiers, name);
             },
@@ -322,6 +333,21 @@ fn checkUnusedImports(self: *Linter) void {
             const loc = self.tree.tokenLocation(0, info.name_token);
             self.report(loc, .Z013, name);
         }
+    }
+}
+
+fn checkUnusedDecls(self: *Linter) void {
+    if (!self.config.isRuleEnabled(.Z037)) return;
+
+    for (self.container_decls.items) |decl| {
+        if (decl.is_import) continue;
+        if (self.isPublicDecl(decl.node) or self.isExportedDecl(decl.node)) continue;
+        const name = self.tree.tokenSlice(decl.name_token);
+        if (std.mem.eql(u8, name, "_")) continue;
+        if (self.used_identifiers.contains(name)) continue;
+
+        const loc = self.tree.tokenLocation(0, decl.name_token);
+        self.report(loc, .Z037, name);
     }
 }
 
@@ -1225,6 +1251,32 @@ fn isPublicDecl(self: *Linter, node: Ast.Node.Index) bool {
     return std.mem.eql(u8, prev_slice, "pub");
 }
 
+fn isExportedDecl(self: *Linter, node: Ast.Node.Index) bool {
+    const main_token = self.tree.nodeMainToken(node);
+    if (main_token == 0) return false;
+    return std.mem.eql(u8, self.tree.tokenSlice(main_token - 1), "export");
+}
+
+fn isContainerScopedDecl(self: *Linter, node: Ast.Node.Index) bool {
+    const parent = self.parent_map[@intFromEnum(node)].unwrap() orelse return true;
+    return switch (self.tree.nodeTag(parent)) {
+        .container_decl,
+        .container_decl_trailing,
+        .container_decl_two,
+        .container_decl_two_trailing,
+        .container_decl_arg,
+        .container_decl_arg_trailing,
+        .tagged_union,
+        .tagged_union_trailing,
+        .tagged_union_two,
+        .tagged_union_two_trailing,
+        .tagged_union_enum_tag,
+        .tagged_union_enum_tag_trailing,
+        => true,
+        else => false,
+    };
+}
+
 fn isTypeDecl(self: *Linter, var_decl: Ast.full.VarDecl) bool {
     const init_node = var_decl.ast.init_node.unwrap() orelse return false;
     return self.isTypeExpression(init_node);
@@ -2083,6 +2135,7 @@ fn checkFnDecl(self: *Linter, node: Ast.Node.Index) void {
 
     const name_token = fn_proto.name_token orelse return;
     const name = self.tree.tokenSlice(name_token);
+    self.trackContainerDecl(node, name_token, false);
 
     const returns_type = if (fn_proto.ast.return_type.unwrap()) |ret| blk: {
         break :blk self.tree.nodeTag(ret) == .identifier and
@@ -2380,6 +2433,9 @@ fn checkVarDecl(self: *Linter, node: Ast.Node.Index) void {
 
     const name_token = var_decl.ast.mut_token + 1;
     const name = self.tree.tokenSlice(name_token);
+    self.trackImportBinding(node, var_decl, name_token);
+    const is_import = if (self.import_bindings.get(name)) |info| info.name_token == name_token else false;
+    self.trackContainerDecl(node, name_token, is_import);
 
     if (name.len > 0 and name[0] == '_' and name.len > 1 and name[1] != '_') {
         if (var_decl.ast.init_node != .none) {
@@ -2456,7 +2512,6 @@ fn checkVarDecl(self: *Linter, node: Ast.Node.Index) void {
     }
 
     self.checkDupeImport(var_decl, name_token);
-    self.trackImportBinding(node, var_decl, name_token);
     self.checkRedundantAsInVarDecl(var_decl);
 }
 
@@ -2496,6 +2551,25 @@ fn trackImportBinding(self: *Linter, node: Ast.Node.Index, var_decl: Ast.full.Va
         .is_discard = is_discard,
         // ziglint-ignore: Z026 -- import tracking must survive OOM mid-lint
     }) catch {};
+}
+
+fn trackContainerDecl(self: *Linter, node: Ast.Node.Index, name_token: Ast.TokenIndex, is_import: bool) void {
+    if (!self.config.isRuleEnabled(.Z037)) return;
+    if (!self.isContainerScopedDecl(node)) return;
+
+    var current = node;
+    while (self.parent_map[@intFromEnum(current)].unwrap()) |parent| {
+        if (self.tree.nodeTag(parent) == .test_decl) return;
+        current = parent;
+    }
+
+    const decl: ContainerDecl = .{
+        .node = node,
+        .name_token = name_token,
+        .is_import = is_import,
+    };
+    // ziglint-ignore: Z026 -- declaration tracking must survive OOM mid-lint
+    self.container_decls.append(self.allocator, decl) catch {};
 }
 
 fn checkDupeImport(self: *Linter, var_decl: Ast.full.VarDecl, name_token: Ast.TokenIndex) void {
@@ -6213,7 +6287,7 @@ test "Z012: pub fn using pub type from enclosing struct is ok" {
 
 test "Z012: pub fn using non-pub type from enclosing struct is error" {
     var linter: Linter = .init(std.testing.allocator,
-        \\const Foo = struct {
+        \\pub const Foo = struct {
         \\    const Inner = struct {};
         \\    pub fn a(i: Inner) void { _ = i; }
         \\};
@@ -6986,7 +7060,7 @@ test "Z035: namespace alias in a type position" {
         \\const std = @import("std");
         \\const mem = std.mem;
         \\
-        \\fn clone(allocator: std.mem.Allocator) void {
+        \\pub fn clone(allocator: std.mem.Allocator) void {
         \\    _ = allocator;
         \\}
     , "test.zig", null);
@@ -9535,4 +9609,126 @@ test "Z036: allow specific std.testing assertions" {
     defer linter.deinit();
     linter.lint();
     try std.testing.expectEqual(0, linter.diagnosticCount(.Z036));
+}
+
+test "Z037: detect unused top-level declarations" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const unused = 42;
+        \\var counter: u32 = 0;
+        \\fn helper() void {}
+        \\pub fn main() void {}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(3, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: detect unused container members" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const Foo = struct {
+        \\    const unused = 1;
+        \\    var state: u32 = 0;
+        \\    fn helper() void {}
+        \\    const used = 2;
+        \\    fn called() void {}
+        \\};
+        \\pub fn main() void {
+        \\    _ = Foo.used;
+        \\    Foo.called();
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(3, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: allow used declarations" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const answer = 42;
+        \\var calls: u32 = 0;
+        \\fn helper() void { calls += 1; }
+        \\pub fn main() void {
+        \\    _ = answer;
+        \\    helper();
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: allow public and exported declarations" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\pub const visible = 42;
+        \\pub var state: u32 = 0;
+        \\pub fn main() void {}
+        \\export fn entry() void {}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: direct export argument counts as a use" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\fn entry() void {}
+        \\comptime {
+        \\    @export(entry, .{ .name = "entry" });
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: declarations in test blocks are excluded" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\test "example" {
+        \\    const Foo = struct {
+        \\        const unused = 1;
+        \\        fn helper() void {}
+        \\    };
+        \\    _ = Foo;
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: unused imports stay with Z013" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const unused = @import("unused.zig");
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z013));
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: inferred container member call counts as a use" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const Foo = struct {
+        \\    fn init() Foo { return .{}; }
+        \\};
+        \\fn make() Foo { return .init(); }
+        \\pub fn main() void { _ = make(); }
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z037));
+}
+
+test "Z037: equal names in different containers are separate declarations" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const A = struct { const hidden = 1; };
+        \\const B = struct { const hidden = 2; };
+        \\pub fn main() void {
+        \\    _ = A;
+        \\    _ = B;
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(2, linter.diagnosticCount(.Z037));
 }

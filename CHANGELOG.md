@@ -5,6 +5,11 @@ Changes a user of ziglint notices, newest first, in the
 
 ## [Unreleased]
 
+### Added
+
+- Z037 reports unreferenced container-scoped constants, variables, and functions.
+  Public, exported, and test declarations are excluded.
+
 ### Fixes
 
 - Z034, Z035, and Z036 resolve aliases through enclosing blocks and containers.

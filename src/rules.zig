@@ -39,6 +39,7 @@ pub const Rule = enum(u16) {
     Z034 = 34,
     Z035 = 35,
     Z036 = 36,
+    Z037 = 37,
 
     /// Returns the config struct type for this rule.
     /// All config types have `enabled: bool` (default varies per rule).
@@ -281,6 +282,7 @@ pub const Rule = enum(u16) {
                 try writer.print("use alias {s}'{s}'{s} instead of {s}'{s}'{s}", .{ y, alias, r, y, path, r });
             },
             .Z036 => try writeTestingExpectMessage(writer, context, b, y, m, d, r),
+            .Z037 => try writer.print("unused container declaration {s}'{s}'{s}", .{ y, context, r }),
         }
     }
 };
