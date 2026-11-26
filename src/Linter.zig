@@ -1704,11 +1704,15 @@ fn checkArgumentOrder(self: *Linter, node: Ast.Node.Index) void {
             if (self.isReceiverParam(param)) continue;
         }
 
-        const kind = self.classifyParam(param);
+        var peek = it;
+        const kind: ParamKind = if (self.isFormatPair(param, peek.next()))
+            .other
+        else
+            self.classifyParam(param);
 
         // Runtime value params take any position: std's own corpus
-        // interleaves them freely (std.fmt.format(writer, comptime fmt,
-        // args), std.fmt.allocPrint(gpa, comptime fmt, args)). The rule
+        // interleaves them freely (Writer.print(w, comptime fmt, args),
+        // ArrayList.print(self, gpa, comptime fmt, args)). The rule
         // orders the structural kinds among themselves — a total order
         // including "other" flagged every writer-first and
         // ctx-then-callback API.
@@ -1736,6 +1740,17 @@ fn checkArgumentOrder(self: *Linter, node: Ast.Node.Index) void {
             max_token = param.name_token orelse max_token;
         }
     }
+}
+
+/// `comptime fmt: []const u8, args: anytype` follows ArrayList.print, which
+/// puts the format string after the allocator.
+fn isFormatPair(self: *Linter, param: Ast.full.FnProto.Param, next: ?Ast.full.FnProto.Param) bool {
+    if (!self.isComptimeParam(param)) return false;
+    const type_node = param.type_expr orelse return false;
+    if (!std.mem.eql(u8, self.tree.getNodeSource(type_node), "[]const u8")) return false;
+    const args = next orelse return false;
+    const token = args.anytype_ellipsis3 orelse return false;
+    return self.tree.tokenTag(token) == .keyword_anytype;
 }
 
 fn isComptimeParam(self: *Linter, param: Ast.full.FnProto.Param) bool {
@@ -7761,6 +7776,42 @@ test "Z023: comptime value after allocator is bad" {
     try std.testing.expectEqual(1, linter.diagnosticCount(.Z023));
 }
 
+test "Z023: format string after allocator is ok" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\fn print(gpa: std.mem.Allocator, comptime fmt: []const u8, args: anytype) void {
+        \\    _ = .{ gpa, fmt, args };
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(0, linter.diagnosticCount(.Z023));
+}
+
+test "Z023: comptime string after allocator without args is bad" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\fn bad(gpa: std.mem.Allocator, comptime name: []const u8) void {
+        \\    _ = .{ gpa, name };
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z023));
+}
+
+test "Z023: type param after allocator before format string is bad" {
+    var linter: Linter = .init(std.testing.allocator,
+        \\const std = @import("std");
+        \\fn bad(gpa: std.mem.Allocator, comptime T: type, comptime fmt: []const u8, args: anytype) T {
+        \\    _ = .{ gpa, fmt, args };
+        \\}
+    , "test.zig", null);
+    defer linter.deinit();
+    linter.lint();
+    try std.testing.expectEqual(1, linter.diagnosticCount(.Z023));
+}
+
 test "Z023: comptime value before allocator is ok" {
     var linter: Linter = .init(std.testing.allocator,
         \\const std = @import("std");
@@ -7776,7 +7827,7 @@ test "Z023: comptime value before allocator is ok" {
 }
 
 test "Z023: runtime value before comptime param is ok" {
-    // std.fmt.format(writer, comptime fmt, args): runtime value params take
+    // Writer.print(w, comptime fmt, args): runtime value params take
     // any position; the rule orders structural params, not prose.
     var linter: Linter = .init(std.testing.allocator,
         \\fn writeMetric(writer: u32, comptime name: []const u8) void {
