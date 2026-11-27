@@ -12,6 +12,8 @@ Changes a user of ziglint notices, newest first, in the
 
 ### Fixes
 
+- Z023 allows a format string after the allocator, as in
+  `ArrayList.print(self, gpa, comptime fmt, args)`. `comptime T: type` there is still flagged.
 - Z034, Z035, and Z036 resolve aliases through enclosing blocks and containers.
   Local aliases work, and shadowed names no longer resolve to file-scope declarations.
 
